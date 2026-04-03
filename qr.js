@@ -53,8 +53,7 @@ router.get('/', async (req, res) => {
                 console.log('2. Go to Settings > Linked Devices');
                 console.log('3. Tap "Link a Device"');
                 console.log('4. Scan the QR code below');
-                // Display QR in terminal
-                //qrcodeTerminal.generate(qr, { small: true });
+                
                 try {
                     // Generate QR code as data URL
                     const qrDataURL = await QRCode.toDataURL(qr, {
@@ -95,18 +94,18 @@ router.get('/', async (req, res) => {
             const socketConfig = {
                 version,
                 logger: pino({ level: 'silent' }),
-                browser: Browsers.windows('Chrome'), // Using Browsers enum for better compatibility
+                browser: Browsers.windows('Chrome'),
                 auth: {
                     creds: state.creds,
                     keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
                 },
-                markOnlineOnConnect: false, // Disable to reduce connection issues
-                generateHighQualityLinkPreview: false, // Disable to reduce connection issues
-                defaultQueryTimeoutMs: 60000, // Increase timeout
-                connectTimeoutMs: 60000, // Increase connection timeout
-                keepAliveIntervalMs: 30000, // Keep connection alive
-                retryRequestDelayMs: 250, // Retry delay
-                maxRetries: 5, // Maximum retries
+                markOnlineOnConnect: false,
+                generateHighQualityLinkPreview: false,
+                defaultQueryTimeoutMs: 60000,
+                connectTimeoutMs: 60000,
+                keepAliveIntervalMs: 30000,
+                retryRequestDelayMs: 250,
+                maxRetries: 5,
             };
 
             // Create socket and bind events
@@ -126,13 +125,11 @@ router.get('/', async (req, res) => {
                 if (connection === 'open') {
                     console.log('✅ Connected successfully!');
                     console.log('💾 Session saved to:', dirs);
-                    reconnectAttempts = 0; // Reset reconnect attempts on successful connection
+                    reconnectAttempts = 0;
                     
                     try {
-                        
-                        
                         // Read the session file
-                        const sessionKnight = fs.readFileSync(dirs + '/creds.json');
+                        const sessionNova = fs.readFileSync(dirs + '/creds.json');
                         
                         // Get the user's JID from the session
                         const userJid = Object.keys(sock.authState.creds.me || {}).length > 0 
@@ -142,27 +139,17 @@ router.get('/', async (req, res) => {
                         if (userJid) {
                             // Send session file to user
                             await sock.sendMessage(userJid, {
-                                document: sessionKnight,
+                                document: sessionNova,
                                 mimetype: 'application/json',
                                 fileName: 'creds.json'
                             });
                             console.log("📄 Session file sent successfully to", userJid);
                             
-                            // Send video thumbnail with caption
+                            // Send success message
                             await sock.sendMessage(userJid, {
-                                image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
-                                caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
+                                text: `✅ *NOVA MD Session Generated Successfully!*\n\n📍 *Keep this file safe!*\n⚠️ Do not share this file with anyone.\n\n✨ POWERED BY NOVA MD`
                             });
-                            console.log("🎬 Video guide sent successfully");
-                            
-                            // Send warning message
-                            await sock.sendMessage(userJid, {
-                                text: `⚠️Do not share this file with anybody⚠️\n 
-┌┤✑  Thanks for using Knight Bot
-│└────────────┈ ⳹        
-│©2025 Mr Unique Hacker 
-└─────────────────┈ ⳹\n\n`
-                            });
+                            console.log("✅ Success message sent successfully");
                         } else {
                             console.log("❌ Could not determine user JID to send session file");
                         }
@@ -179,7 +166,7 @@ router.get('/', async (req, res) => {
                         } else {
                             console.log('❌ Failed to clean up session folder');
                         }
-                    }, 15000); // Wait 15 seconds before cleanup to ensure messages are sent
+                    }, 15000);
                 }
 
                 if (connection === 'close') {
@@ -190,7 +177,6 @@ router.get('/', async (req, res) => {
                     
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
                     
-                    // Handle specific error codes
                     if (statusCode === 401) {
                         console.log('🔐 Logged out - need new QR code');
                         removeFile(dirs);
@@ -200,7 +186,6 @@ router.get('/', async (req, res) => {
                         
                         if (reconnectAttempts <= maxReconnectAttempts) {
                             console.log(`🔄 Reconnect attempt ${reconnectAttempts}/${maxReconnectAttempts}`);
-                            // Wait a bit before reconnecting
                             setTimeout(() => {
                                 try {
                                     sock = makeWASocket(socketConfig);
@@ -219,14 +204,12 @@ router.get('/', async (req, res) => {
                         }
                     } else {
                         console.log('🔄 Connection lost - attempting to reconnect...');
-                        // Let it reconnect automatically
                     }
                 }
             };
 
             // Bind the event handler
             sock.ev.on('connection.update', handleConnectionUpdate);
-
             sock.ev.on('creds.update', saveCreds);
 
             // Set a timeout to clean up if no QR is generated
@@ -236,7 +219,7 @@ router.get('/', async (req, res) => {
                     res.status(408).send({ code: 'QR generation timeout' });
                     removeFile(dirs);
                 }
-            }, 30000); // 30 second timeout
+            }, 30000);
 
         } catch (err) {
             console.error('Error initializing session:', err);
