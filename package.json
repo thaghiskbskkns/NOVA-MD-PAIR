@@ -1,7 +1,7 @@
 {
   "name": "nova md",
   "version": "1.0.0",
-  "description": "NOVA MD - WhatsApp Pair Code Generator",
+  "description": "Nova Md - WhatsApp Pair Code Generator",
   "main": "index.js",
   "type": "module",
   "engines": {
