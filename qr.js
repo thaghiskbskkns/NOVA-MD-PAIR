@@ -4,58 +4,49 @@ import pino from 'pino';
 import { makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import { delay } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
-import qrcodeTerminal from 'qrcode-terminal';
+import crypto from 'crypto';
 
 const router = express.Router();
 
-// Function to remove files or directories
+function generateSessionId() {
+    return 'NovaMd~' + crypto.randomBytes(32).toString('hex');
+}
+
 function removeFile(FilePath) {
     try {
         if (!fs.existsSync(FilePath)) return false;
         fs.rmSync(FilePath, { recursive: true, force: true });
         return true;
     } catch (e) {
-        console.error('Error removing file:', e);
         return false;
     }
 }
 
 router.get('/', async (req, res) => {
-    // Generate unique session for each request to avoid conflicts
-    const sessionId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
-    const dirs = `./qr_sessions/session_${sessionId}`;
+    const sessionId = generateSessionId();
+    const dirs = `./qr_sessions/${sessionId}`;
 
-    // Ensure qr_sessions directory exists
     if (!fs.existsSync('./qr_sessions')) {
         fs.mkdirSync('./qr_sessions', { recursive: true });
     }
 
     async function initiateSession() {
-        // ✅ PERMANENT FIX: Create the session folder before anything
         if (!fs.existsSync(dirs)) fs.mkdirSync(dirs, { recursive: true });
 
         const { state, saveCreds } = await useMultiFileAuthState(dirs);
 
         try {
-            const { version, isLatest } = await fetchLatestBaileysVersion();
+            const { version } = await fetchLatestBaileysVersion();
             
             let qrGenerated = false;
             let responseSent = false;
 
-            // QR Code handling logic
             const handleQRCode = async (qr) => {
                 if (qrGenerated || responseSent) return;
                 
                 qrGenerated = true;
-                console.log('🟢 QR Code Generated! Scan it with your WhatsApp app.');
-                console.log('📋 Instructions:');
-                console.log('1. Open WhatsApp on your phone');
-                console.log('2. Go to Settings > Linked Devices');
-                console.log('3. Tap "Link a Device"');
-                console.log('4. Scan the QR code below');
                 
                 try {
-                    // Generate QR code as data URL
                     const qrDataURL = await QRCode.toDataURL(qr, {
                         errorCorrectionLevel: 'M',
                         type: 'image/png',
@@ -69,7 +60,6 @@ router.get('/', async (req, res) => {
 
                     if (!responseSent) {
                         responseSent = true;
-                        console.log('QR Code generated successfully');
                         await res.send({ 
                             qr: qrDataURL, 
                             message: 'QR Code Generated! Scan it with your WhatsApp app.',
@@ -82,7 +72,6 @@ router.get('/', async (req, res) => {
                         });
                     }
                 } catch (qrError) {
-                    console.error('Error generating QR code:', qrError);
                     if (!responseSent) {
                         responseSent = true;
                         res.status(500).send({ code: 'Failed to generate QR code' });
@@ -90,7 +79,6 @@ router.get('/', async (req, res) => {
                 }
             };
 
-            // Improved Baileys socket configuration
             const socketConfig = {
                 version,
                 logger: pino({ level: 'silent' }),
@@ -108,111 +96,74 @@ router.get('/', async (req, res) => {
                 maxRetries: 5,
             };
 
-            // Create socket and bind events
             let sock = makeWASocket(socketConfig);
             let reconnectAttempts = 0;
             const maxReconnectAttempts = 3;
 
-            // Connection event handler function
             const handleConnectionUpdate = async (update) => {
                 const { connection, lastDisconnect, qr } = update;
-                console.log(`🔄 Connection update: ${connection || 'undefined'}`);
 
                 if (qr && !qrGenerated) {
                     await handleQRCode(qr);
                 }
 
                 if (connection === 'open') {
-                    console.log('✅ Connected successfully!');
-                    console.log('💾 Session saved to:', dirs);
                     reconnectAttempts = 0;
                     
                     try {
-                        // Read the session file
                         const sessionNova = fs.readFileSync(dirs + '/creds.json');
                         
-                        // Get the user's JID from the session
                         const userJid = Object.keys(sock.authState.creds.me || {}).length > 0 
                             ? jidNormalizedUser(sock.authState.creds.me.id) 
                             : null;
                             
                         if (userJid) {
-                            // Send session file to user
                             await sock.sendMessage(userJid, {
                                 document: sessionNova,
                                 mimetype: 'application/json',
                                 fileName: 'creds.json'
                             });
-                            console.log("📄 Session file sent successfully to", userJid);
                             
-                            // Send success message
                             await sock.sendMessage(userJid, {
-                                text: `✅ *NOVA MD Session Generated Successfully!*\n\n📍 *Keep this file safe!*\n⚠️ Do not share this file with anyone.\n\n✨ POWERED BY NOVA MD`
+                                text: `✅ *Session Generated Successfully!*\n\n📍 Session ID: ${sessionId}\n⚠️ Keep this file safe! Do not share it with anyone.`
                             });
-                            console.log("✅ Success message sent successfully");
-                        } else {
-                            console.log("❌ Could not determine user JID to send session file");
                         }
-                    } catch (error) {
-                        console.error("Error sending session file:", error);
-                    }
+                    } catch (error) {}
                     
-                    // Clean up session after successful connection and sending files
                     setTimeout(() => {
-                        console.log('🧹 Cleaning up session...');
-                        const deleted = removeFile(dirs);
-                        if (deleted) {
-                            console.log('✅ Session cleaned up successfully');
-                        } else {
-                            console.log('❌ Failed to clean up session folder');
-                        }
+                        removeFile(dirs);
                     }, 15000);
                 }
 
                 if (connection === 'close') {
-                    console.log('❌ Connection closed');
-                    if (lastDisconnect?.error) {
-                        console.log('❗ Last Disconnect Error:', lastDisconnect.error);
-                    }
-                    
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
                     
                     if (statusCode === 401) {
-                        console.log('🔐 Logged out - need new QR code');
                         removeFile(dirs);
                     } else if (statusCode === 515 || statusCode === 503) {
-                        console.log(`🔄 Stream error (${statusCode}) - attempting to reconnect...`);
                         reconnectAttempts++;
                         
                         if (reconnectAttempts <= maxReconnectAttempts) {
-                            console.log(`🔄 Reconnect attempt ${reconnectAttempts}/${maxReconnectAttempts}`);
                             setTimeout(() => {
                                 try {
                                     sock = makeWASocket(socketConfig);
                                     sock.ev.on('connection.update', handleConnectionUpdate);
                                     sock.ev.on('creds.update', saveCreds);
-                                } catch (err) {
-                                    console.error('Failed to reconnect:', err);
-                                }
+                                } catch (err) {}
                             }, 2000);
                         } else {
-                            console.log('❌ Max reconnect attempts reached');
                             if (!responseSent) {
                                 responseSent = true;
                                 res.status(503).send({ code: 'Connection failed after multiple attempts' });
                             }
                         }
-                    } else {
-                        console.log('🔄 Connection lost - attempting to reconnect...');
                     }
                 }
             };
 
-            // Bind the event handler
             sock.ev.on('connection.update', handleConnectionUpdate);
             sock.ev.on('creds.update', saveCreds);
 
-            // Set a timeout to clean up if no QR is generated
             setTimeout(() => {
                 if (!responseSent) {
                     responseSent = true;
@@ -222,7 +173,6 @@ router.get('/', async (req, res) => {
             }, 30000);
 
         } catch (err) {
-            console.error('Error initializing session:', err);
             if (!res.headersSent) {
                 res.status(503).send({ code: 'Service Unavailable' });
             }
@@ -233,7 +183,6 @@ router.get('/', async (req, res) => {
     await initiateSession();
 });
 
-// Global uncaught exception handler
 process.on('uncaughtException', (err) => {
     let e = String(err);
     if (e.includes("conflict")) return;
@@ -244,10 +193,8 @@ process.on('uncaughtException', (err) => {
     if (e.includes("Timed Out")) return;
     if (e.includes("Value not found")) return;
     if (e.includes("Stream Errored")) return;
-    if (e.includes("Stream Errored (restart required)")) return;
     if (e.includes("statusCode: 515")) return;
     if (e.includes("statusCode: 503")) return;
-    console.log('Caught exception: ', err);
 });
 
 export default router;
