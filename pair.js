@@ -1,316 +1,197 @@
 import express from 'express';
-import fs from 'fs-extra';
+import fs from 'fs';
 import pino from 'pino';
+import zlib from 'zlib';
+import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pn from 'awesome-phonenumber';
-import {
-    makeWASocket,
-    useMultiFileAuthState,
-    delay,
-    makeCacheableSignalKeyStore,
-    Browsers,
-    jidNormalizedUser,
-    fetchLatestBaileysVersion,
-    DisconnectReason
-} from '@whiskeysockets/baileys';
-import uploadToPastebin from './Paste.js';
 
 const router = express.Router();
-const MAX_RECONNECT_ATTEMPTS = 3;
-const SESSION_TIMEOUT = 5 * 60 * 1000;
-const CLEANUP_DELAY = 5000;
 
-const MESSAGE = `
-*SESSION GENERATED SUCCESSFULLY* ✅
+// Convert creds.json to 64-based session string
+function credsToSessionString(credsPath) {
+    try {
+        const credsBuffer = fs.readFileSync(credsPath);
+        const compressed = zlib.gzipSync(credsBuffer);
+        const base64 = compressed.toString('base64');
+        return `NovaMd~${base64}`;
+    } catch (error) {
+        console.error('Error converting creds to session string:', error);
+        return null;
+    }
+}
 
-*Gɪᴠᴇ ᴀ ꜱᴛᴀʀ ᴛᴏ ʀᴇᴘᴏ ꜰᴏʀ ᴄᴏᴜʀᴀɢᴇ* 🌟
-https://github.com/GlobalTechInfo/MEGA-MD
-
-*Sᴜᴘᴘᴏʀᴛ Gʀᴏᴜᴘ ꜰᴏʀ ϙᴜᴇʀʏ* 💭
-https://t.me/Global_TechInfo
-https://whatsapp.com/channel/0029VagJIAr3bbVBCpEkAM07
-
-*Yᴏᴜ-ᴛᴜʙᴇ ᴛᴜᴛᴏʀɪᴀʟꜱ* 🪄 
-https://youtube.com/@GlobalTechInfo
-
-*MEGA-MD--WHATSAPP* 🥀
-`;
-
-async function removeFile(FilePath) {
+// Ensure the session directory exists
+function removeFile(FilePath) {
     try {
         if (!fs.existsSync(FilePath)) return false;
-        await fs.remove(FilePath);
-        return true;
+        fs.rmSync(FilePath, { recursive: true, force: true });
     } catch (e) {
         console.error('Error removing file:', e);
-        return false;
     }
 }
 
 router.get('/', async (req, res) => {
     let num = req.query.number;
+    let dirs = './' + (num || `session`);
 
-    if (!num) {
-        return res.status(400).send({ code: 'Phone number is required' });
-    }
+    // Remove existing session if present
+    await removeFile(dirs);
 
+    // Clean the phone number - remove any non-digit characters
     num = num.replace(/[^0-9]/g, '');
+
+    // Validate the phone number using awesome-phonenumber
     const phone = pn('+' + num);
-
     if (!phone.isValid()) {
-        return res.status(400).send({ code: 'Invalid phone number. Use full international format without + or spaces.' });
+        if (!res.headersSent) {
+            return res.status(400).send({ code: 'Invalid phone number. Please enter your full international number (e.g., 15551234567 for US, 447911123456 for UK, 84987654321 for Vietnam, etc.) without + or spaces.' });
+        }
+        return;
     }
-
+    // Use the international number format (E.164, without '+')
     num = phone.getNumber('e164').replace('+', '');
 
-    const sessionId = Date.now().toString() + Math.random().toString(36).substring(2, 9);
-    const dirs = `./auth_info_baileys/session_${sessionId}`;
-
-    let pairingCodeSent = false;
-    let sessionCompleted = false;
-    let isCleaningUp = false;
-    let responseSent = false;
-    let reconnectAttempts = 0;
-    let currentSocket = null;
-    let timeoutHandle = null;
-
-    async function cleanup(reason = 'unknown') {
-        if (isCleaningUp) return;
-        isCleaningUp = true;
-
-        console.log(`🧹 Cleaning up session ${sessionId} (${num}) - Reason: ${reason}`);
-
-        if (timeoutHandle) {
-            clearTimeout(timeoutHandle);
-            timeoutHandle = null;
-        }
-
-        if (currentSocket) {
-            try {
-                currentSocket.ev.removeAllListeners();
-                await currentSocket.end();
-            } catch (e) {
-                console.error('Error closing socket:', e);
-            }
-            currentSocket = null;
-        }
-
-        setTimeout(async () => {
-            await removeFile(dirs);
-        }, CLEANUP_DELAY);
-    }
-
     async function initiateSession() {
-        if (sessionCompleted || isCleaningUp) {
-            console.log('⚠️ Session already completed or cleaning up');
-            return;
-        }
-
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-            console.log(`❌ Max reconnection attempts reached for ${num}`);
-            if (!responseSent && !res.headersSent) {
-                responseSent = true;
-                res.status(503).send({ code: 'Connection failed after multiple attempts' });
-            }
-            await cleanup('max_reconnects');
-            return;
-        }
+        const { state, saveCreds } = await useMultiFileAuthState(dirs);
 
         try {
-            if (!fs.existsSync(dirs)) {
-                await fs.mkdir(dirs, { recursive: true });
-            }
-
-            const { state, saveCreds } = await useMultiFileAuthState(dirs);
-            const { version } = await fetchLatestBaileysVersion();
-
-            if (currentSocket) {
-                try {
-                    currentSocket.ev.removeAllListeners();
-                    await currentSocket.end();
-                } catch (e) {}
-            }
-
-            currentSocket = makeWASocket({
+            const { version, isLatest } = await fetchLatestBaileysVersion();
+            let NovaBot = makeWASocket({
                 version,
                 auth: {
                     creds: state.creds,
                     keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
                 },
                 printQRInTerminal: false,
-                logger: pino({ level: "silent" }),
-                browser: Browsers.macOS('Chrome'),
+                logger: pino({ level: "fatal" }).child({ level: "fatal" }),
+                browser: Browsers.windows('Chrome'),
                 markOnlineOnConnect: false,
                 generateHighQualityLinkPreview: false,
                 defaultQueryTimeoutMs: 60000,
                 connectTimeoutMs: 60000,
                 keepAliveIntervalMs: 30000,
                 retryRequestDelayMs: 250,
-                maxRetries: 3,
+                maxRetries: 5,
             });
 
-            const sock = currentSocket;
-
-            sock.ev.on('connection.update', async (update) => {
-                if (isCleaningUp) return;
-
-                const { connection, lastDisconnect, isNewLogin } = update;
+            NovaBot.ev.on('connection.update', async (update) => {
+                const { connection, lastDisconnect, isNewLogin, isOnline } = update;
 
                 if (connection === 'open') {
-                    if (sessionCompleted) {
-                        console.log('⚠️ Session already completed, skipping...');
-                        return;
-                    }
-                    sessionCompleted = true;
-
+                    console.log("✅ Connected successfully!");
+                    console.log("📱 Sending session to user...");
+                    
                     try {
-                        const credsFile = `${dirs}/creds.json`;
-                        if (fs.existsSync(credsFile)) {
-                            console.log(`📄 Uploading creds.json for ${num} to Pastebin...`);
-                            const pastebinUrl = await uploadToPastebin(credsFile, 'creds.json', 'json', '1');
-                            console.log('✅ Session uploaded to Pastebin:', pastebinUrl);
+                        const credsPath = dirs + '/creds.json';
+                        const sessionKnight = fs.readFileSync(credsPath);
+                        const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
 
-                            const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
-                            const msg = await sock.sendMessage(userJid, { text: pastebinUrl });
-                            await sock.sendMessage(userJid, { text: MESSAGE, quoted: msg });
+                        // Method 1: Send creds.json file
+                        await NovaBot.sendMessage(userJid, {
+                            document: sessionKnight,
+                            mimetype: 'application/json',
+                            fileName: 'creds.json'
+                        });
+                        console.log("📄 creds.json file sent successfully");
 
-                            await delay(1000);
+                        // Method 2: Generate and send 64-based session string
+                        const sessionString = credsToSessionString(credsPath);
+                        if (sessionString) {
+                            const sessionMessage = `✅ *NOVA MD Session Generated Successfully!*\n\n` +
+                                `📋 *Copy this 64-based session string to your config.js:*\n\n` +
+                                `\`\`\`\n${sessionString}\n\`\`\`\n\n` +
+                                `📍 *Instructions:*\n` +
+                                `1. Copy the string above\n` +
+                                `2. Paste it in your config.js as sessionID\n` +
+                                `3. Restart your bot\n\n` +
+                                `⚠️ *Keep this string safe! Do not share it with anyone.*\n\n` +
+                                `✨ POWERED BY NOVA MD`;
+                            
+                            await NovaBot.sendMessage(userJid, { text: sessionMessage });
+                            console.log("🔑 64-based session string sent successfully");
+                            console.log(`📝 Session string length: ${sessionString.length} characters`);
                         }
-                    } catch (err) {
-                        console.error('Error sending session:', err);
-                    } finally {
-                        await cleanup('session_complete');
+
+                        // Clean up session after use
+                        console.log("🧹 Cleaning up session...");
+                        await delay(1000);
+                        removeFile(dirs);
+                        console.log("✅ Session cleaned up successfully");
+                        console.log("🎉 Process completed successfully!");
+                        
+                    } catch (error) {
+                        console.error("❌ Error sending messages:", error);
+                        removeFile(dirs);
                     }
                 }
 
                 if (isNewLogin) {
-                    console.log(`🔐 New login via pair code for ${num}`);
+                    console.log("🔐 New login via pair code");
+                }
+
+                if (isOnline) {
+                    console.log("📶 Client is online");
                 }
 
                 if (connection === 'close') {
-                    if (sessionCompleted || isCleaningUp) {
-                        console.log('✅ Session completed, not reconnecting');
-                        await cleanup('already_complete');
-                        return;
-                    }
-
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    const reason = lastDisconnect?.error?.output?.payload?.error;
 
-                    console.log(`❌ Connection closed - Status: ${statusCode}, Reason: ${reason}`);
-
-                    if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                        console.log(`❌ Logged out or invalid pairing for ${num}`);
-                        if (!responseSent && !res.headersSent) {
-                            responseSent = true;
-                            res.status(401).send({ code: 'Invalid pairing code or session expired' });
-                        }
-                        await cleanup('logged_out');
-                    } else if (pairingCodeSent && !sessionCompleted) {
-                        reconnectAttempts++;
-                        console.log(`🔁 Reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} for ${num}`);
-                        await delay(2000);
-                        await initiateSession();
+                    if (statusCode === 401) {
+                        console.log("❌ Logged out from WhatsApp. Need to generate new pair code.");
                     } else {
-                        await cleanup('connection_closed');
+                        console.log("🔁 Connection closed — restarting...");
+                        initiateSession();
                     }
                 }
             });
 
-            if (!sock.authState.creds.registered && !pairingCodeSent && !isCleaningUp) {
-                await delay(1500);
-                try {
-                    pairingCodeSent = true;
-                    let code = await sock.requestPairingCode(num);
-                    code = code?.match(/.{1,4}/g)?.join('-') || code;
+            if (!NovaBot.authState.creds.registered) {
+                await delay(3000);
+                num = num.replace(/[^\d+]/g, '');
+                if (num.startsWith('+')) num = num.substring(1);
 
-                    if (!responseSent && !res.headersSent) {
-                        responseSent = true;
-                        res.send({ code });
-                        console.log(`📱 Pairing code sent for ${num}: ${code}`);
+                try {
+                    let code = await NovaBot.requestPairingCode(num);
+                    code = code?.match(/.{1,4}/g)?.join('-') || code;
+                    if (!res.headersSent) {
+                        console.log({ num, code });
+                        await res.send({ code });
                     }
                 } catch (error) {
-                    console.error('❌ Error requesting pairing code:', error);
-                    pairingCodeSent = false;
-                    if (!responseSent && !res.headersSent) {
-                        responseSent = true;
-                        res.status(503).send({ code: 'Failed to get pairing code' });
+                    console.error('Error requesting pairing code:', error);
+                    if (!res.headersSent) {
+                        res.status(503).send({ code: 'Failed to get pairing code. Please check your phone number and try again.' });
                     }
-                    await cleanup('pairing_code_error');
                 }
             }
 
-            sock.ev.on('creds.update', saveCreds);
-
-            timeoutHandle = setTimeout(async () => {
-                if (!sessionCompleted && !isCleaningUp) {
-                    console.log(`⏰ Pairing timeout for ${num}`);
-                    if (!responseSent && !res.headersSent) {
-                        responseSent = true;
-                        res.status(408).send({ code: 'Pairing timeout' });
-                    }
-                    await cleanup('timeout');
-                }
-            }, SESSION_TIMEOUT);
-
+            NovaBot.ev.on('creds.update', saveCreds);
         } catch (err) {
-            console.error(`❌ Error initializing session for ${num}:`, err);
-            if (!responseSent && !res.headersSent) {
-                responseSent = true;
+            console.error('Error initializing session:', err);
+            if (!res.headersSent) {
                 res.status(503).send({ code: 'Service Unavailable' });
             }
-            await cleanup('init_error');
         }
     }
 
     await initiateSession();
 });
 
-setInterval(async () => {
-    try {
-        const baseDir = './auth_info_baileys';
-        if (!fs.existsSync(baseDir)) return;
-
-        const sessions = await fs.readdir(baseDir);
-        const now = Date.now();
-
-        for (const session of sessions) {
-            const sessionPath = `${baseDir}/${session}`;
-            try {
-                const stats = await fs.stat(sessionPath);
-                if (now - stats.mtimeMs > 10 * 60 * 1000) {
-                    console.log(`🗑️ Removing old session: ${session}`);
-                    await fs.remove(sessionPath);
-                }
-            } catch (e) {}
-        }
-    } catch (e) {
-        console.error('Error in cleanup interval:', e);
-    }
-}, 60000);
-
-process.on('SIGTERM', async () => {
-    console.log('🛑 SIGTERM received, cleaning up...');
-    try { await fs.remove('./auth_info_baileys'); } catch (e) {}
-    process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-    console.log('🛑 SIGINT received, cleaning up...');
-    try { await fs.remove('./auth_info_baileys'); } catch (e) {}
-    process.exit(0);
-});
-
+// Global uncaught exception handler
 process.on('uncaughtException', (err) => {
-    const e = String(err);
-    const ignore = [
-        "conflict", "not-authorized", "Socket connection timeout",
-        "rate-overlimit", "Connection Closed", "Timed Out",
-        "Value not found", "Stream Errored", "Stream Errored (restart required)",
-        "statusCode: 515", "statusCode: 503"
-    ];
-    if (!ignore.some(x => e.includes(x))) {
-        console.log('Caught exception:', err);
-    }
+    let e = String(err);
+    if (e.includes("conflict")) return;
+    if (e.includes("not-authorized")) return;
+    if (e.includes("Socket connection timeout")) return;
+    if (e.includes("rate-overlimit")) return;
+    if (e.includes("Connection Closed")) return;
+    if (e.includes("Timed Out")) return;
+    if (e.includes("Value not found")) return;
+    if (e.includes("Stream Errored")) return;
+    if (e.includes("Stream Errored (restart required)")) return;
+    if (e.includes("statusCode: 515")) return;
+    if (e.includes("statusCode: 503")) return;
+    console.log('Caught exception: ', err);
 });
 
 export default router;
